@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quoteshot"
+version = "0.1.0"
+description = "Offline photo-to-quote workflow for trades: photos and human notes in a job folder, priced from a local price book, rendered as a clean HTML + plain-text quote. No AI, no API, no network."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Ghost Developer Studio" }]
+keywords = ["quote", "trades", "offline", "exif", "pricebook"]
+dependencies = []
+
+[project.scripts]
+quoteshot = "quoteshot.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
