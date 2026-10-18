@@ -9,10 +9,11 @@ photos were listed not analysed, and no AI was used.
 from __future__ import annotations
 
 import html
+from decimal import localcontext
 from pathlib import Path
 
 from .job import PHOTOS_DIR, pricebook_is_sample, totals
-from .money import fmt_money, parse_decimal
+from .money import _wide_prec, fmt_money, parse_decimal
 
 FOOTER = ("Prices are from the business's local price book as recorded in "
           "this quote. Photos are listed by filename only; they were not "
@@ -21,7 +22,12 @@ FOOTER = ("Prices are from the business's local price book as recorded in "
 
 def _pct(rate) -> str:
     """Tax rate as a percent string without noisy trailing zeros."""
-    pct = (rate * 100).normalize()
+    # Multiply and normalize under a context sized to the rate: the
+    # ambient 28-digit context used to round the displayed rate on
+    # long rates, so the quote's tax label disagreed with its maths.
+    with localcontext() as ctx:
+        ctx.prec = _wide_prec(rate)
+        pct = (rate * 100).normalize()
     return format(pct, "f")
 
 
@@ -58,6 +64,14 @@ def _photo_line(p: dict) -> str:
 
 
 def render_text(job: dict) -> str:
+    """Return the plain-text quote (quote.txt content) for a job.
+
+    Layout, top to bottom: business, SAMPLE banner if any, title /
+    date / customer, notes, measurements, numbered items as
+    ``qty unit x unit price = line total``, then Subtotal, a Tax line
+    that names the rate and the taxable amount it was charged on,
+    Total, the photo list (file names only), and the no-AI footer.
+    """
     t = totals(job)
     cur = t["currency"]
     sample = pricebook_is_sample(job)
@@ -136,6 +150,12 @@ footer{margin-top:2rem;font-size:.85rem;color:#555;border-top:1px solid #ddd;pad
 
 
 def render_html(job: dict) -> str:
+    """Return the HTML quote (quote.html content) for a job.
+
+    Same content and totals as :func:`render_text`, as a single
+    self-contained page: all user text is HTML-escaped, photos are
+    shown with ``<figure>`` elements, and GPS is never rendered.
+    """
     t = totals(job)
     cur = t["currency"]
     sample = pricebook_is_sample(job)
@@ -216,6 +236,11 @@ def render_html(job: dict) -> str:
 
 
 def render_job(job_dir, job: dict, out_dir=None) -> tuple[Path, Path]:
+    """Write quote.html and quote.txt; return ``(html_path, txt_path)``.
+
+    Output goes to ``out_dir`` if given, otherwise into the job
+    folder itself.
+    """
     out = Path(out_dir) if out_dir else Path(job_dir)
     out.mkdir(parents=True, exist_ok=True)
     html_path = out / "quote.html"

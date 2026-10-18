@@ -20,10 +20,25 @@ class QuoteShotError(Exception):
         self.fatal = fatal
 
 
+# No legitimate price, quantity, or tax rate needs more than this many
+# significant digits or a larger exponent. Without a bound, a value like
+# 1e100000000 parses fine and then makes quantize() / format(..., "f")
+# build a hundred-million-digit string (memory blow-up) downstream.
+_MAX_DIGITS = 1000
+_MAX_ADJUSTED = 1000
+
+
 def parse_decimal(value, field: str) -> Decimal:
     """Parse a decimal from a string/int/Decimal, naming the field on error."""
     if isinstance(value, Decimal):
-        return value
+        # A Decimal handed in directly must pass the same finite gate as
+        # a parsed one: Decimal("NaN") used to sail through here untouched
+        # and poison (or, for sNaN, crash) every caller downstream.
+        if not value.is_finite():
+            raise QuoteShotError(f"{field}: not a finite number: {value!r}")
+        parsed = value
+        _check_magnitude(parsed, field, value)
+        return parsed
     if isinstance(value, bool) or value is None:
         raise QuoteShotError(f"{field}: not a number: {value!r}")
     if isinstance(value, float):
@@ -41,7 +56,15 @@ def parse_decimal(value, field: str) -> Decimal:
         # quantity, or tax rate is never legitimately non-finite, so the
         # field is rejected here, at the single parse gate (polish A1).
         raise QuoteShotError(f"{field}: not a finite number: {value!r}")
+    _check_magnitude(parsed, field, value)
     return parsed
+
+
+def _check_magnitude(parsed: Decimal, field: str, original) -> None:
+    if parsed and (len(parsed.as_tuple().digits) > _MAX_DIGITS
+                    or abs(parsed.adjusted()) > _MAX_ADJUSTED):
+        raise QuoteShotError(
+            f"{field}: number is implausibly large: {original!r}")
 
 
 def _wide_prec(*values: Decimal) -> int:
@@ -61,6 +84,7 @@ def _wide_prec(*values: Decimal) -> int:
 
 
 def money(value: Decimal) -> Decimal:
+    """Round a Decimal amount half-up to cents (two decimal places)."""
     if not isinstance(value, Decimal) or not value.is_finite():
         raise QuoteShotError(f"amount: not a finite number: {value!r}")
     with localcontext() as ctx:

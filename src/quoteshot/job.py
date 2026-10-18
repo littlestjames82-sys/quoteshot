@@ -22,11 +22,19 @@ PHOTOS_DIR = "photos"
 
 
 def now_iso() -> str:
+    """Current local time as an ISO-8601 string, for record timestamps."""
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def init_job(job_dir, *, title, customer, contact="", business="",
              tax_rate="0", currency="USD", pricebook=None) -> dict:
+    """Create a job folder and its job.json; return the new job dict.
+
+    ``tax_rate`` is a decimal fraction (``"0.0825"`` = 8.25%). If a
+    ``pricebook`` is given it is validated first, its currency wins
+    over ``currency``, and whether it was a sample book is recorded
+    on the job. Refuses to overwrite an existing job.json.
+    """
     d = Path(job_dir)
     jf = d / JOB_FILE
     if jf.exists():
@@ -36,6 +44,8 @@ def init_job(job_dir, *, title, customer, contact="", business="",
     rate = parse_decimal(tax_rate, "tax_rate")
     if rate < 0 or rate > 1:
         raise QuoteShotError(f"tax_rate: must be between 0 and 1, got {rate}")
+    if not isinstance(currency, str) or not currency.strip():
+        raise QuoteShotError(f"currency: must be a non-empty string, got {currency!r}")
     pb_ref = None
     pb_sample = False
     if pricebook:
@@ -70,6 +80,7 @@ def init_job(job_dir, *, title, customer, contact="", business="",
 
 
 def load_job(job_dir) -> dict:
+    """Load and check a job folder's job.json; raise if missing/bad."""
     d = Path(job_dir)
     jf = d / JOB_FILE
     if not jf.is_file():
@@ -83,10 +94,25 @@ def load_job(job_dir) -> dict:
     if not isinstance(job, dict) or job.get("version") != 1:
         raise QuoteShotError(f"{jf}: unsupported job format (version must be 1)",
                              fatal=True)
+    # Structural check: a hand-edited job.json whose fields have the
+    # wrong shape used to crash render/show with an AttributeError
+    # traceback (e.g. "customer" as a string, "items" as an object).
+    # Name the offending field instead, as a fatal (exit 2) error.
+    for field in ("notes", "photos", "items"):
+        value = job.get(field)
+        if value is not None and (not isinstance(value, list)
+                                  or any(not isinstance(v, dict) for v in value)):
+            raise QuoteShotError(
+                f"{jf}: {field}: must be a list of objects", fatal=True)
+    for field in ("measurements", "customer", "business"):
+        value = job.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise QuoteShotError(f"{jf}: {field}: must be an object", fatal=True)
     return job
 
 
 def save_job(job_dir, job: dict) -> Path:
+    """Write ``job`` as job.json inside ``job_dir``; return its path."""
     d = Path(job_dir)
     d.mkdir(parents=True, exist_ok=True)
     jf = d / JOB_FILE
@@ -95,6 +121,7 @@ def save_job(job_dir, job: dict) -> Path:
 
 
 def job_pricebook(job: dict) -> dict | None:
+    """Load the price book a job refers to, or None if it has none."""
     ref = job.get("pricebook")
     if not ref:
         return None
@@ -128,13 +155,22 @@ def pricebook_is_sample(job: dict) -> bool:
 # photos
 
 def add_photos(job_dir, job: dict, photo_paths) -> list[dict]:
+    """Copy each photo into photos/, record it on the job, and save.
+
+    Returns the new photo records. A taken file name gets a ``-2``,
+    ``-3`` suffix instead of overwriting; a non-image is rejected
+    by name (see :mod:`quoteshot.photos`).
+    """
     d = Path(job_dir)
     photos_dir = d / PHOTOS_DIR
     photos_dir.mkdir(exist_ok=True)
+    # Validate every source first, then copy: a batch used to copy the
+    # good photos and only then fail on a missing / non-image file,
+    # leaving orphan files in photos/ that job.json knew nothing about.
+    described = [(raw, describe_photo(Path(raw))) for raw in photo_paths]
     added = []
-    for raw in photo_paths:
+    for raw, record in described:
         src = Path(raw)
-        record = describe_photo(src)  # rejects non-images by name
         dest = photos_dir / record["filename"]
         same_file = dest.exists() and src.resolve() == dest.resolve()
         if not same_file:
@@ -157,6 +193,7 @@ def add_photos(job_dir, job: dict, photo_paths) -> list[dict]:
 # notes / measurements
 
 def add_note(job: dict, text: str, measurements: dict | None = None) -> None:
+    """Append a timestamped note and/or merge measurements onto a job."""
     if text:
         job.setdefault("notes", []).append({"at": now_iso(), "text": text})
     for key, value in (measurements or {}).items():
@@ -168,6 +205,13 @@ def add_note(job: dict, text: str, measurements: dict | None = None) -> None:
 
 def add_item(job: dict, *, sku=None, name=None, price=None, qty="1",
              unit=None, description=None, taxable=None) -> dict:
+    """Append one line item to a job and return it.
+
+    With ``sku``, every field is snapshotted from the job's price
+    book. Without it, ``name`` and an explicit ``price`` are required
+    (an ad-hoc item). ``unit`` / ``description`` / ``taxable``, when
+    given, override the snapshotted values for this line only.
+    """
     qty_d = parse_decimal(qty, "qty")
     if qty_d <= 0:
         raise QuoteShotError(f"qty: must be greater than 0, got {qty_d}")
@@ -224,6 +268,7 @@ def add_item(job: dict, *, sku=None, name=None, price=None, qty="1",
 
 
 def remove_item(job: dict, index: int) -> dict:
+    """Remove and return the item at 1-based ``index`` (as listed)."""
     items = job.get("items", [])
     if index < 1 or index > len(items):
         raise QuoteShotError(
@@ -232,8 +277,19 @@ def remove_item(job: dict, index: int) -> dict:
 
 
 def line_total(item: dict) -> Decimal:
+    """One line's total: quantity x unit price, rounded half-up to cents."""
+    if not isinstance(item, dict):
+        raise QuoteShotError(f"line item: must be an object, got {item!r}")
+    if "taxable" in item and not isinstance(item["taxable"], bool):
+        raise QuoteShotError(f"taxable: must be true or false, got {item['taxable']!r}")
     qty = parse_decimal(item.get("qty", "1"), "qty")
+    if qty <= 0:
+        # add_item enforces this at entry; enforce it here too so a
+        # hand-edited job.json cannot render a negative-quantity quote.
+        raise QuoteShotError(f"qty: must be greater than 0, got {qty}")
     price = parse_decimal(item.get("unit_price", "0"), "unit_price")
+    if price < 0:
+        raise QuoteShotError(f"unit_price: negative price {price}")
     # Multiply under a context sized to the operands: the ambient
     # 28-digit context silently rounds long products before they are
     # ever rounded to cents on purpose (polish A2).
@@ -244,9 +300,23 @@ def line_total(item: dict) -> Decimal:
 
 
 def totals(job: dict) -> dict:
-    """{lines: [...with line_total], subtotal, taxable_subtotal, tax, total}."""
+    """Compute a job's totals.
+
+    Returns a dict with ``lines`` (each item plus its ``line_total``),
+    ``subtotal``, ``taxable_subtotal``, ``tax_rate``, ``tax``,
+    ``total``, and ``currency``. Money values are Decimal. Tax is
+    charged only on taxable lines: tax = taxable subtotal x tax rate.
+    """
+    raw_items = job.get("items", [])
+    if not isinstance(raw_items, list):
+        raise QuoteShotError(f"items: must be a list, got {raw_items!r}")
+    currency_raw = job.get("currency") or "USD"
+    if not isinstance(currency_raw, str):
+        # .upper() on an int/list from a hand-edited job used to crash
+        # totals (and every render) with an AttributeError traceback.
+        raise QuoteShotError(f"currency: must be a string, got {currency_raw!r}")
     lines = []
-    raw_lines = [(item, line_total(item)) for item in job.get("items", [])]
+    raw_lines = [(item, line_total(item)) for item in raw_items]
     with localcontext() as ctx:
         ctx.prec = _wide_prec(*(lt for _item, lt in raw_lines))
         subtotal = Decimal("0")
@@ -258,16 +328,25 @@ def totals(job: dict) -> dict:
     for item, lt in raw_lines:
         lines.append({**item, "line_total": dec_str(lt)})
     rate = parse_decimal(job.get("tax_rate", "0"), "tax_rate")
+    if rate < 0 or rate > 1:
+        # init_job enforces this at entry; a hand-edited job.json used
+        # to render 500% (or negative) tax with no complaint at all.
+        raise QuoteShotError(f"tax_rate: must be between 0 and 1, got {rate}")
     with localcontext() as ctx:
         ctx.prec = _wide_prec(taxable_subtotal, rate)
         raw_tax = taxable_subtotal * rate
     tax = money(raw_tax)
+    with localcontext() as ctx:
+        # subtotal + tax under the ambient 28-digit context silently
+        # dropped the cents on large totals (1e30 + tax lost 0.01).
+        ctx.prec = _wide_prec(subtotal, tax)
+        grand = subtotal + tax
     return {
         "lines": lines,
         "subtotal": money(subtotal),
         "taxable_subtotal": money(taxable_subtotal),
         "tax_rate": rate,
         "tax": tax,
-        "total": money(subtotal + tax),
-        "currency": (job.get("currency") or "USD").upper(),
+        "total": money(grand),
+        "currency": currency_raw.upper(),
     }

@@ -25,7 +25,14 @@ from .money import QuoteShotError
 # public API
 
 def describe_photo(path: Path) -> dict:
-    """Return the photo record dict for a file (no copying done here)."""
+    """Return the photo record dict for a file (no copying done here).
+
+    The record holds ``filename``, ``size_bytes``, ``sha256``,
+    ``format`` (``jpeg`` / ``png`` / ``gif``), ``width`` / ``height``,
+    ``captured_at``, ``camera_make`` / ``camera_model``, ``has_exif``,
+    and ``has_gps`` / ``gps_lat`` / ``gps_lon``. Fields a file does
+    not carry are None, never guessed. Non-images are rejected.
+    """
     path = Path(path)
     if not path.is_file():
         raise QuoteShotError(f"photo not found: {path}")
@@ -189,7 +196,12 @@ class _Tiff:
             fmt = "II" if typ == 5 else "ii"
             for k in range(cnt):
                 num, den = struct.unpack_from(self.endian + fmt, raw, k * 8)
-                vals.append(num / den if den else 0.0)
+                if not den:
+                    # A zero denominator makes the rational undefined,
+                    # not 0: returning 0.0 used to fabricate a GPS
+                    # component (e.g. seconds) the photo never carried.
+                    return []
+                vals.append(num / den)
             return vals
         except Exception:
             return []
@@ -242,14 +254,20 @@ def _parse_exif_tiff(data: bytes) -> dict:
             lon_ref = t.ascii(gps.get(3))
             lon = t.rationals(gps.get(4))
             if len(lat) == 3 and len(lon) == 3:
+                # DMS components must be in range: minutes/seconds of
+                # 999 (or a latitude of 999 degrees) used to be folded
+                # into a plausible-looking but invented coordinate.
+                dms_ok = all(0 <= part[1] < 60 and 0 <= part[2] < 60
+                             and part[0] >= 0 for part in (lat, lon))
                 la = lat[0] + lat[1] / 60 + lat[2] / 3600
                 lo = lon[0] + lon[1] / 60 + lon[2] / 3600
                 if (lat_ref or "N").upper().startswith("S"):
                     la = -la
                 if (lon_ref or "E").upper().startswith("W"):
                     lo = -lo
-                out["gps_lat"] = round(la, 7)
-                out["gps_lon"] = round(lo, 7)
+                if dms_ok and abs(la) <= 90 and abs(lo) <= 180:
+                    out["gps_lat"] = round(la, 7)
+                    out["gps_lon"] = round(lo, 7)
     except Exception:
         # Fail soft per photo, per PLAN: record what parsed, invent nothing.
         return out

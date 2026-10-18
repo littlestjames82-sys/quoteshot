@@ -34,6 +34,9 @@ SAMPLE_ITEMS = [
 
 
 def empty_book(currency: str = "USD", sample: bool = False) -> dict:
+    """Return a new version-1 price book dict (empty, or SAMPLE-filled)."""
+    if not isinstance(currency, str) or not currency.strip():
+        raise QuoteShotError(f"currency: must be a non-empty string, got {currency!r}")
     book = {"version": 1, "currency": currency.upper(), "sample": bool(sample),
             "items": list(SAMPLE_ITEMS) if sample else []}
     if sample:
@@ -43,6 +46,7 @@ def empty_book(currency: str = "USD", sample: bool = False) -> dict:
 
 
 def load_pricebook(path) -> dict:
+    """Load a price book file and validate it; raise a named error if bad."""
     p = Path(path)
     if not p.is_file():
         raise QuoteShotError(f"price book not found: {p}", fatal=True)
@@ -59,6 +63,7 @@ def load_pricebook(path) -> dict:
 
 
 def save_pricebook(path, book: dict) -> Path:
+    """Write ``book`` as JSON to ``path`` (creating folders); return it."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(book, indent=2) + "\n", encoding="utf-8")
@@ -66,11 +71,23 @@ def save_pricebook(path, book: dict) -> Path:
 
 
 def validate_pricebook(book) -> list[str]:
+    """Return a list of problems with ``book`` (empty list means valid).
+
+    Each problem names its item by SKU (or position) and its field,
+    e.g. a duplicate SKU, a missing name/unit, or a negative price.
+    """
     errors: list[str] = []
     if not isinstance(book, dict):
         return ["price book must be a JSON object"]
-    if book.get("version") != 1:
+    if isinstance(book.get("version"), bool) or book.get("version") != 1:
         errors.append("version: must be 1")
+    if "currency" in book and (not isinstance(book["currency"], str)
+                               or not book["currency"].strip()):
+        errors.append("currency: must be a non-empty string")
+    if "sample" in book and not isinstance(book["sample"], bool):
+        # A string "false" is truthy: it used to pass validation and
+        # then stamp a SAMPLE banner on every quote from the book.
+        errors.append("sample: must be true or false")
     items = book.get("items")
     if not isinstance(items, list):
         return errors + ["items: must be a list"]
@@ -81,17 +98,19 @@ def validate_pricebook(book) -> list[str]:
             errors.append(f"{where}: must be an object")
             continue
         sku = item.get("sku")
-        if not sku or not isinstance(sku, str):
+        if not isinstance(sku, str) or not sku.strip():
             errors.append(f"{where}.sku: missing or not a string")
             continue
         where = f"item {sku!r}"
         if sku in seen:
             errors.append(f"{where}: duplicate SKU")
         seen.add(sku)
-        if not item.get("name"):
+        if not isinstance(item.get("name"), str) or not item["name"].strip():
             errors.append(f"{where}.name: missing")
-        if not item.get("unit"):
+        if not isinstance(item.get("unit"), str) or not item["unit"].strip():
             errors.append(f"{where}.unit: missing")
+        if "description" in item and not isinstance(item["description"], str):
+            errors.append(f"{where}.description: must be a string")
         if "unit_price" not in item:
             errors.append(f"{where}.unit_price: missing")
         else:
@@ -108,6 +127,7 @@ def validate_pricebook(book) -> list[str]:
 
 
 def find_item(book: dict, sku: str) -> dict | None:
+    """Return the price-book item with exactly this ``sku``, or None."""
     for item in book.get("items", []):
         if item.get("sku") == sku:
             return item
@@ -115,6 +135,7 @@ def find_item(book: dict, sku: str) -> dict | None:
 
 
 def upsert_item(book: dict, item: dict, replace: bool = False) -> None:
+    """Add ``item`` to ``book``; a duplicate SKU needs ``replace=True``."""
     existing = find_item(book, item["sku"])
     if existing is not None and not replace:
         raise QuoteShotError(
@@ -126,6 +147,13 @@ def upsert_item(book: dict, item: dict, replace: bool = False) -> None:
 
 
 def normalise_item(sku, name, unit, unit_price, description="", taxable=True) -> dict:
+    """Build a validated price-book item dict from raw CLI/file values."""
+    # The CLI writes whatever this returns straight into the book: a
+    # blank sku/name/unit used to be saved without complaint and the
+    # book then failed its own validation on the next load.
+    for field, value in (("sku", sku), ("name", name), ("unit", unit)):
+        if not isinstance(value, str) or not value.strip():
+            raise QuoteShotError(f"item {field}: must be a non-empty string, got {value!r}")
     price = parse_decimal(unit_price, f"item {sku!r} unit_price")
     if price < 0:
         raise QuoteShotError(f"item {sku!r} unit_price: negative price {price}")
