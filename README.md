@@ -1,5 +1,6 @@
 # QuoteShot
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/littlestjames82-sys/quoteshot/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/quoteshot/actions/workflows/ci.yml/actions)
 
 **Walk the job, take photos, price it from your own price book, hand the customer a clean quote. All on your own computer, with no AI and no internet.**
 
